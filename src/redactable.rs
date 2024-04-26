@@ -49,5 +49,3 @@ fn add_noise(buffer: &mut String) {
     }
     *buffer = new_buffer;
 }
-
-

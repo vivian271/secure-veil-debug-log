@@ -102,10 +102,9 @@ impl quote::ToTokens for RedactionLength {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct RedactFlags {
     pub redact_length: RedactionLength,
-
-    /// The character to use for redacting. Defaults to `*`.
     pub redact_char: char,
 }
+
 impl Default for RedactFlags {
     fn default() -> Self {
         Self {
@@ -114,6 +113,7 @@ impl Default for RedactFlags {
         }
     }
 }
+
 impl ExtractFlags for RedactFlags {
     type Options = ();
 

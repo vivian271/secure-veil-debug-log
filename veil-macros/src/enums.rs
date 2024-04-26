@@ -3,6 +3,7 @@ use crate::{
     fmt::{self, FormatData},
     redact::UnusedDiagnostic,
 };
+use diff_priv::noise::laplace::laplace_noiser::LaplaceNoiser; // Import LaplaceNoiser
 use proc_macro::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -20,7 +21,6 @@ pub(super) fn derive_redact(
     name_ident: syn::Ident,
     unused: &mut UnusedDiagnostic,
 ) -> Result<TokenStream, syn::Error> {
-    // Parse #[redact(all, variant, ...)] from the enum attributes, if present.
     let top_level_flags = match FieldFlags::extract::<1>("Redact", &attrs, FieldFlagsParse { skip_allowed: false })? {
         [Some(flags)] => {
             if !flags.all || !flags.variant {
@@ -34,11 +34,9 @@ pub(super) fn derive_redact(
                 Some(flags)
             }
         }
-
         _ => None,
     };
 
-    // Collect each variant's flags
     let mut variant_flags = Vec::with_capacity(e.variants.len());
     for variant in &e.variants {
         let mut flags = match FieldFlags::extract::<2>(
@@ -49,16 +47,13 @@ pub(super) fn derive_redact(
             },
         )? {
             [None, None] => EnumVariantFieldFlags::default(),
-
             [Some(flags), None] => {
                 if flags.all && flags.variant {
-                    // #[redact(all, variant, ...)]
                     return Err(syn::Error::new(
                         variant.attrs[0].span(),
                         "`#[redact(all, variant, ...)]` is invalid here, split into two separate attributes instead to apply redacting options to the variant name or all fields respectively",
                     ));
                 } else if flags.all {
-                    // #[redact(all, ...)]
                     EnumVariantFieldFlags {
                         variant_flags: None,
                         all_fields_flags: Some(flags),
@@ -70,8 +65,6 @@ pub(super) fn derive_redact(
                             "`#[redact(display)]` is invalid here, enum variants are always displayed using std::fmt::Display",
                         ));
                     }
-
-                    // #[redact(variant, ...)]
                     EnumVariantFieldFlags {
                         variant_flags: Some(flags),
                         all_fields_flags: None,
@@ -83,19 +76,15 @@ pub(super) fn derive_redact(
                     ));
                 }
             }
-
             [Some(flags0), Some(flags1)] => {
                 let mut variant_flags = EnumVariantFieldFlags::default();
-
                 for flags in [flags0, flags1] {
                     if flags.all && flags.variant {
-                        // #[redact(all, variant, ...)]
                         return Err(syn::Error::new(
                             variant.span(),
                             "`#[redact(all, variant, ...)]` is invalid here, split into two separate attributes instead to apply redacting options to the variant name or all fields respectively",
                         ));
                     } else if flags.all {
-                        // #[redact(all, ...)]
                         if variant_flags.all_fields_flags.is_some() {
                             return Err(syn::Error::new(
                                 variant.span(),
@@ -104,7 +93,6 @@ pub(super) fn derive_redact(
                         }
                         variant_flags.all_fields_flags = Some(flags);
                     } else if flags.variant {
-                        // #[redact(variant, ...)]
                         if variant_flags.variant_flags.is_some() {
                             return Err(syn::Error::new(
                                 variant.span(),
@@ -119,14 +107,11 @@ pub(super) fn derive_redact(
                         ));
                     }
                 }
-
                 variant_flags
             }
-
             [None, ..] => unreachable!(),
         };
 
-        // If there's top level flags, apply them to the variant's flags if they're not already set.
         if flags.variant_flags.is_none() {
             if let Some(top_level_flags) = top_level_flags {
                 flags.variant_flags = Some(top_level_flags);
@@ -136,50 +121,56 @@ pub(super) fn derive_redact(
         variant_flags.push(flags);
     }
 
-    // Create an iterator that will yield variant names as an identifier.
-    // We'll use this to match on the variants in the Debug impl.
     let variant_idents = e.variants.iter().map(|variant| &variant.ident);
 
-    // Create an iterator that will yield tokens that destructure an enum variant into its respective fields.
-    // Struct variant fields are destructed as normal.
-    // Tuple variant fields are destructed as arg0, arg1, ... argN.
-    // Unit variants yield no tokens.
     let variant_destructures = e.variants.iter().map(|variant| match &variant.fields {
         syn::Fields::Named(syn::FieldsNamed { named, .. }) => {
             let idents = named.iter().map(|field| field.ident.as_ref().unwrap());
-            quote! {
-                { #(#idents),* }
-            }
+            quote! { { #(#idents),* } }
         }
         syn::Fields::Unnamed(syn::FieldsUnnamed { unnamed, .. }) => {
-            let args = (0..unnamed.len()).map(|i| syn::Ident::new(&format!("arg{i}"), unnamed.span()));
-            quote! {
-                ( #(#args),* )
-            }
+            let args = (0..unnamed.len()).map(|i| syn::Ident::new(&format!("arg{}", i), unnamed.span()));
+            quote! { ( #(#args),* ) }
         }
         syn::Fields::Unit => Default::default(),
     });
 
-    // Create an iterator that will yield the tokens of the body of the match arm for each variant.
-    // These match arm bodies will actually print data into the Formatter.
+    // Create a LaplaceNoiser instance
+    let noiser = LaplaceNoiser::new(0.1, 3, 0.1); // could adjust the noise parameters
+
     let mut variant_bodies = Vec::with_capacity(e.variants.len());
     for (variant, flags) in e.variants.iter().zip(variant_flags.into_iter()) {
-        // Variant name redacting
         let variant_name = variant.ident.to_string();
         let variant_name = if let Some(flags @ FieldFlags { skip: false, .. }) = &flags.variant_flags {
-            // The variant name must always be formatted with the Display impl.
             let flags = FieldFlags {
                 display: true,
                 ..*flags
             };
-
-            // Generate the RedactionFormatter expression for the variant name
             let redact = fmt::generate_redact_call(quote! { &#variant_name }, false, &flags, unused);
-
-            // Because the other side is expecting a &str, we need to convert the RedactionFormatter to a String (and then to a &str)
             quote! { format!("{:?}", #redact).as_str() }
         } else {
             variant_name.into_token_stream()
+        };
+
+        let noised_fields = match &variant.fields {
+            syn::Fields::Named(named) => {
+                let noised_fields = named.named.iter().map(|field| {
+                    let field_name = field.ident.as_ref().unwrap().to_string();
+                    if field_name == "number" { //  'number' is a sensitive field
+                        quote! {
+                            let noised_value = noiser.add_noise(self.#field_name);
+                            fmt.write_str(&format!("{:?}", noised_value))?;
+                        }
+                    } else {
+                        quote! {
+                            fmt.write_str(&format!("{:?}", self.#field_name))?;
+                        }
+                    }
+                });
+
+                quote! { #(#noised_fields);*; }
+            }
+            _ => Default::default(),
         };
 
         variant_bodies.push(match &variant.fields {
@@ -200,13 +191,15 @@ pub(super) fn derive_redact(
                 }
             }
         });
+
+        variant_bodies.push(noised_fields);
     }
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     Ok(quote! {
         impl #impl_generics ::std::fmt::Debug for #name_ident #ty_generics #where_clause {
             fn fmt(&self, fmt: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                #[allow(unused)] // Suppresses unused warning with `#[redact(display)]`
+                #[allow(unused)]
                 let alternate = fmt.alternate();
 
                 match self {
