@@ -59,7 +59,7 @@ The project aims to enhance data privacy in software development by implementing
 - Modified Veil's source code to integrate differential privacy functionality.
 
 ### Workflow Diagram:
-![alt text](https://github.com/vivian271/secure-veil-debug-log/blob/secure-debug-log/Graphs/DFD.png)
+![alt text](https://github.com/vivian271/secure-veil-debug-log/blob/secure-debug-log/Workflow%20Diagram.png)
 
 ## Implementation 1: DP Implementation w/ dataset using Rust's Veil [[secure-veil-debug-log branch](https://github.com/vivian271/secure-veil-debug-log)]
 #### Implementation Details
