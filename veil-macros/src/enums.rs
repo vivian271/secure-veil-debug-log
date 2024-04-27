@@ -3,6 +3,7 @@ use crate::{
     fmt::{self, FormatData},
     redact::UnusedDiagnostic,
 };
+//added diff_priv module
 use diff_priv::noise::laplace::laplace_noiser::LaplaceNoiser; // Import LaplaceNoiser
 use proc_macro::TokenStream;
 use quote::ToTokens;
@@ -136,7 +137,7 @@ pub(super) fn derive_redact(
     });
 
     // Create a LaplaceNoiser instance
-    let noiser = LaplaceNoiser::new(0.1, 3, 0.1); // could adjust the noise parameters
+    let noiser = LaplaceNoiser::new(0.4, 3, 4.2); // could adjust the noise parameters
 
     let mut variant_bodies = Vec::with_capacity(e.variants.len());
     for (variant, flags) in e.variants.iter().zip(variant_flags.into_iter()) {
@@ -151,28 +152,30 @@ pub(super) fn derive_redact(
         } else {
             variant_name.into_token_stream()
         };
-
+        // added Noised fields in variant_bodies
         let noised_fields = match &variant.fields {
             syn::Fields::Named(named) => {
                 let noised_fields = named.named.iter().map(|field| {
                     let field_name = field.ident.as_ref().unwrap().to_string();
-                    if field_name == "number" { //  'number' is a sensitive field
+                    if field_name == "number" {
+                        //  say 'number' is a sensitive field
                         quote! {
+                            // if the field is sensitive, add noise to the field
                             let noised_value = noiser.add_noise(self.#field_name);
                             fmt.write_str(&format!("{:?}", noised_value))?;
                         }
                     } else {
+                        // other fields are not sensitive
                         quote! {
                             fmt.write_str(&format!("{:?}", self.#field_name))?;
                         }
                     }
                 });
-
+                // return the noised fields
                 quote! { #(#noised_fields);*; }
             }
             _ => Default::default(),
         };
-
         variant_bodies.push(match &variant.fields {
             syn::Fields::Named(named) => {
                 FormatData::FieldsNamed(named).impl_debug(variant_name, flags.all_fields_flags, false, unused)?
@@ -191,7 +194,7 @@ pub(super) fn derive_redact(
                 }
             }
         });
-
+        // add noised fields to variant_bodies
         variant_bodies.push(noised_fields);
     }
 
